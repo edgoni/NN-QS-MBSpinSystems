@@ -16,6 +16,8 @@ import jax.numpy as jnp
 import flax
 import flax.linen as nn
 
+import pathlib
+
 class MultiHead_Att(nn.Module):
   ### Parametros
   layers: int #capas
