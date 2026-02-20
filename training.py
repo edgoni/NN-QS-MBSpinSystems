@@ -94,78 +94,76 @@ lr_name = f'{lr}'
 if lr == lr_schedule_try:
     lr_name = 'sched'
 
-####BUCLE DE ENTRENAMIENTO Y GUARDADO#################
-energies_rbm = np.zeros((len(jz_values),2))
-np.copyto(energies_rbm[:,0], jz_values)
+#### BUCLE DE ENTRENAMIENTO Y GUARDADO CON TRANSFER LEARNING #################
+
+energies_rbm = np.zeros((len(jz_values), 2))
+np.copyto(energies_rbm[:, 0], jz_values)
+
 layers = 1
-for jz in jz_values:
+heads = 3
 
-    path_metrics = f'SelfAtt_metrics{layers}_{jz:.2f}_{lr_name}.csv' 
-    filename = f"SelfAtt{layers}_{jz:.2f}_{lr_name}.mpack"
-    vstate_path = f"vstate_SelfAtt{layers}_{jz:.2f}_{lr_name}.pkl"
-    obs_path = f'obs_layers{layers}_{lr_name}.csv'
+# 1. INICIALIZACIÓN FUERA DEL BUCLE (Transfer Learning)
+# Al declarar vstate aquí, conservamos los pesos entre iteraciones de Jz
+RBM = MultiHead_Att(layers=layers, heads=heads, dk=1)
+vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
 
-
-
-    ##----------------------------------------------------------------------------------------------------------##
-
+for i, jz in enumerate(jz_values):
+    # Definición de paths incluyendo layers y heads
+    path_metrics = f'SelfAtt_metrics{layers}_head{heads}_{jz:.2f}_{lr_name}.csv'
+    filename = f"SelfAtt{layers}_head{heads}_{jz:.2f}_{lr_name}.mpack"
+    vstate_path = f"vstate_SelfAtt{layers}_head{heads}_{jz:.2f}_{lr_name}.pkl"
+    obs_path = f'obs_layers{layers}_head{heads}_{lr_name}.csv'
 
     print(f"\n--- Entrenando para Jz = {jz:.2f} ---")
-    jx = jy = (1 - jz) / 2
+    
+    # Lógica de épocas: más en el inicio, menos en la continuación
+    current_epochs = epochs if i == 0 else 300
 
+    jx = jy = (1 - jz) / 2
     H = KitaevTransverse_H(direcciones, bonds, Jx=jx, Jy=jy, Jz=jz, h=0, hi=hi)
 
-    ##Cambiar por cargar las energías##
-
-    evals = nk.exact.lanczos_ed(H, k=1, compute_eigenvectors=False)
-    energies_exact.append(evals[0] / N)
-
-
-    RBM_name, RBM = f'SelfAtt_{1}', MultiHead_Att(layers = layers, heads = 1, dk=1 )
-
-    vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
-    vstate_init.append(vstate.expect(H))
-
+    # El optimizer y el driver se vinculan al vstate que ya tiene los pesos del Jz anterior
     optimizer = nk.optimizer.AdaGrad(learning_rate=lr, epscut=1e-7)
     driver = nk.driver.VMC(H, optimizer, variational_state=vstate)
 
-    # Reiniciar el Keeper para este punto
+    # El Keeper evalúa la mejor energía para el Hamiltoniano actual
     keeper = BestIterKeeper(H, N, 1e-8)
 
     log = nk.logging.RuntimeLog()
     metrics_history = {'step': [], 'energy': [], 'energy_error': [], 'loss': [], 'variance': []}
+    
+    # make_extract_metrics debe recibir H para calcular correctamente en cada paso
     callback_fn = [keeper.update, make_extract_metrics(metrics_history, H)]
 
-    driver.run(n_iter=epochs, out=log, callback=callback_fn, show_progress=True)
+    # 2. ENTRENAMIENTO
+    driver.run(n_iter=current_epochs, out=log, callback=callback_fn, show_progress=True)
 
-    # guardar energía final de la RBM
+    # 3. ACTUALIZACIÓN ADIABÁTICA (Transfer Learning explícito)
+    # Forzamos que el vstate para el PRÓXIMO Jz empiece con los MEJORES pesos de este Jz
+    vstate.parameters = keeper.best_state.parameters
 
-
-    # guardar como CSV usando Pandas
+    # Guardar métricas del proceso
     df_metrics = pd.DataFrame(metrics_history)
     df_metrics.to_csv(path_metrics, index=False, sep='\t')
 
+    # Guardar pesos optimizados
     with open(filename, "wb") as f:
-        f.write(flax.serialization.to_bytes(keeper.best_state.parameters))
-
+        f.write(flax.serialization.to_bytes(vstate.parameters))
 
     print(f"Pesos guardados en: {filename}")
 
-    params = vstate.parameters
-
+    # Guardar estado en formato pickle
     with open(vstate_path, "wb") as f:
-        pickle.dump(params, f)
+        pickle.dump(vstate.parameters, f)
 
     print("Estado guardado correctamente.")
 
+    # Cálculo de observables con el mejor estado encontrado
     header = ['Jz', 'Energy', 'S', 'm', 'ms', 'fluct', 'fluct_s']
     best = keeper.best_state
-    # Definimos los observables a medir
     obs = [renyi, magnet, mags, magnet @ magnet, mags @ mags]
-    # Calculamos resultados y los metemos en una lista junto a jz y energía
     results = [jz, keeper.best_energy/N] + [np.real(best.expect(o).mean) for o in obs]
 
-    # Escribimos (si el archivo no existe, escribe cabecera + datos; si existe, solo datos)
     file_exists = os.path.isfile(obs_path)
     with open(obs_path, 'a', newline='') as f:
         writer = csv.writer(f, delimiter='\t')
@@ -173,4 +171,4 @@ for jz in jz_values:
             writer.writerow(header)
         writer.writerow(results)
 
-################################################
+###############################################################################
