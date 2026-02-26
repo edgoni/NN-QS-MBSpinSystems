@@ -67,7 +67,7 @@ sampler = nk.sampler.MetropolisSampler(
 )
 #############################################
 
-epochs = 1
+epochs = 7
 
 # definir los inicializadores según el artículo
 weights_init = normal(stddev=0.01)
@@ -112,19 +112,23 @@ maxheads = 4
 
     
 for layers in range(1,maxlayers+1):
-    RBM = DeepRBM(layers=layers, alpha=1)
-    vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
+    
     for i, jz in enumerate(jz_values):
+        ##########DECLARAMOS MODELO EN CADA ITERACION############
+        RBM = DeepRBM(num_layers=layers, alpha=1)
+        vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
+
         # Definición de paths incluyendo layers y heads
         path_metrics = f'RBM_metrics{layers}_{jz:.2f}_{lr_name}.csv'
         filename = f"RBM{layers}_{jz:.2f}_{lr_name}.mpack"
         vstate_path = f"vstate_RBM{layers}_{jz:.2f}_{lr_name}.pkl"
         obs_path = f'RBM_obs_layers{layers}_{lr_name}.csv'
+        path_energies = 'energies_eigenvecs'
 
         print(f"\n--- Entrenando para Jz = {jz:.2f} ---")
 
     # Lógica de épocas: más en el inicio, menos en la continuación
-        current_epochs = epochs if i == 0 else 300
+
 
         jx = jy = (1 - jz) / 2
         H = KitaevTransverse_H(direcciones, bonds, Jx=jx, Jy=jy, Jz=jz, h=0, hi=hi)
@@ -143,7 +147,7 @@ for layers in range(1,maxlayers+1):
         callback_fn = [keeper.update, make_extract_metrics(metrics_history, H)]
 
     # 2. ENTRENAMIENTO
-        driver.run(n_iter=current_epochs, out=log, callback=callback_fn, show_progress=True)
+        driver.run(n_iter=epochs, out=log, callback=callback_fn, show_progress=True)
 
     # 3. ACTUALIZACIÓN ADIABÁTICA (Transfer Learning explícito)
     # Forzamos que el vstate para el PRÓXIMO Jz empiece con los MEJORES pesos de este Jz
@@ -157,12 +161,19 @@ for layers in range(1,maxlayers+1):
         with open(vstate_path, "wb") as f:
             pickle.dump(vstate.parameters, f)
 
-    # Cálculo de observables con el mejor estado encontrado
-        header = ['Jz', 'Energy', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp']
+        # Cálculo de observables con el mejor estado encontrado
+        header = ['Jz', 'Energy', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp','overlap']
         best = keeper.best_state
         wp_val = np.real(best.expect(Wp_op).mean)
         obs = [renyi, magnet, mags, magnet @ magnet, mags @ mags]
-        results = [jz, keeper.best_energy/N] + [np.real(best.expect(o).mean) for o in obs] + [wp_val]
+
+        data = np.load(f"{path_energies}.npz")
+        psi_exact = data['vecs'][:, 0] # El primer eigenvector
+        psi_nqs = vstate.to_array()
+        psi_nqs /= np.linalg.norm(psi_nqs)
+        overlap =  np.abs(np.vdot(psi_nqs, psi_exact))**2
+
+        results = [jz, keeper.best_energy/N] + [np.real(best.expect(o).mean) for o in obs] + [wp_val] +[overlap]
 
         file_exists = os.path.isfile(obs_path)
         with open(obs_path, 'a', newline='') as f:
@@ -170,5 +181,10 @@ for layers in range(1,maxlayers+1):
             if not file_exists:
                 writer.writerow(header)
             writer.writerow(results)
+
+        df_metrics = pd.DataFrame(metrics_history)
+
+            # Guardamos a CSV (usamos index=False para no guardar los números de fila)
+        df_metrics.to_csv(path_metrics, index=False)
 
 ###############################################################################

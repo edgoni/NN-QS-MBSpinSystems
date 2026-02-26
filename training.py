@@ -1,5 +1,4 @@
 ##TRAINING##
-
 ##Import##
 import netket as nk
 import numpy as np
@@ -40,7 +39,7 @@ hi = nk.hilbert.Spin(s=1 / 2, N=kitaev_graph.n_nodes)
 kitaev_graph.hi=hi
 h = 1
 
-#Declare Observables--------------------------------#
+#-----------------------Declare Observables------------------------------#
 renyi = nkx.observable.Renyi2EntanglementEntropy(
     hi, np.arange(0, N / 2 + 1, dtype=int)
 )
@@ -52,11 +51,7 @@ Wp_op = (sigmax(hi, idx[0]) * sigmay(hi, idx[1]) * sigmaz(hi, idx[2]) * sigmax(h
 
 #---------------------------------------------------#
 
-
-#Training--------------------------------------------#
-
-
-####REGLAS d MonteCarlo
+####------------/REGLAS d MonteCarlo/--------------####
 rule1 = nk.sampler.rules.LocalRule()# flip de un solo spin para proponer nuevo estado
 rule2 = nk.sampler.rules.GaussianRule()# flip de todos los spins para proponer nuevo estado
 rules = [rule1]
@@ -65,7 +60,7 @@ sampler = nk.sampler.MetropolisSampler(
 )
 #############################################
 
-epochs = 1
+epochs = 7
 
 # definir los inicializadores según el artículo
 weights_init = normal(stddev=0.01)
@@ -111,57 +106,66 @@ maxheads = 4
     
 for layers in range(1,maxlayers+1):
     for heads in range(1,maxheads+1):
-        RBM = MultiHead_Att(layers=layers, heads=heads, dk=1)
-        vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
+        
         for i, jz in enumerate(jz_values):
             # Definición de paths incluyendo layers y heads
             path_metrics = f'SelfAtt_metrics{layers}_head{heads}_{jz:.2f}_{lr_name}.csv'
             filename = f"SelfAtt{layers}_head{heads}_{jz:.2f}_{lr_name}.mpack"
             vstate_path = f"vstate_SelfAtt{layers}_head{heads}_{jz:.2f}_{lr_name}.pkl"
             obs_path = f'obs_layers{layers}_head{heads}_{lr_name}.csv'
+            path_energies = 'energies_eigenvecs'
 
             print(f"\n--- Entrenando para Jz = {jz:.2f} ---")
 
-    # Lógica de épocas: más en el inicio, menos en la continuación
-            current_epochs = epochs if i == 0 else 300
+            ##########DECLARAMOS MODELO EN CADA ITERACION############
+            RBM = MultiHead_Att(layers=layers, heads=heads, dk=1)
+            vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
+
 
             jx = jy = (1 - jz) / 2
             H = KitaevTransverse_H(direcciones, bonds, Jx=jx, Jy=jy, Jz=jz, h=0, hi=hi)
 
-    # El optimizer y el driver se vinculan al vstate que ya tiene los pesos del Jz anterior
+        # El optimizer y el driver se vinculan al vstate que ya tiene los pesos del Jz anterior
             optimizer = nk.optimizer.AdaGrad(learning_rate=lr, epscut=1e-7)
             driver = nk.driver.VMC(H, optimizer, variational_state=vstate)
 
-    # El Keeper evalúa la mejor energía para el Hamiltoniano actual
+        # El Keeper evalúa la mejor energía para el Hamiltoniano actual
             keeper = BestIterKeeper(H, N, 1e-8)
 
             log = nk.logging.RuntimeLog()
             metrics_history = {'step': [], 'energy': [], 'energy_error': [], 'loss': [], 'variance': []}
 
-    # make_extract_metrics debe recibir H para calcular correctamente en cada paso
+        # make_extract_metrics debe recibir H para calcular correctamente en cada paso
             callback_fn = [keeper.update, make_extract_metrics(metrics_history, H)]
 
-    # 2. ENTRENAMIENTO
-            driver.run(n_iter=current_epochs, out=log, callback=callback_fn, show_progress=True)
+        # ENTRENAMIENTO
+            driver.run(n_iter=epochs, out=log, callback=callback_fn, show_progress=True)
 
-    # 3. ACTUALIZACIÓN ADIABÁTICA (Transfer Learning explícito)
-    # Forzamos que el vstate para el PRÓXIMO Jz empiece con los MEJORES pesos de este Jz
+        # ACTUALIZACIÓN ADIABÁTICA (Transfer Learning explícito)
+        # Forzamos que el vstate para el PRÓXIMO Jz empiece con los MEJORES pesos de este Jz
             vstate.parameters = keeper.best_state.parameters
 
-    # Guardar pesos optimizados
+        # Guardar pesos optimizados
             with open(filename, "wb") as f:
                 f.write(flax.serialization.to_bytes(vstate.parameters))
 
-    # Guardar estado en formato pickle
+        # Guardar estado en formato pickle
             with open(vstate_path, "wb") as f:
                 pickle.dump(vstate.parameters, f)
 
-    # Cálculo de observables con el mejor estado encontrado
-            header = ['Jz', 'Energy', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp']
+        # Cálculo de observables con el mejor estado encontrado
+            header = ['Jz', 'Energy', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp','overlap']
             best = keeper.best_state
             wp_val = np.real(best.expect(Wp_op).mean)
             obs = [renyi, magnet, mags, magnet @ magnet, mags @ mags]
-            results = [jz, keeper.best_energy/N] + [np.real(best.expect(o).mean) for o in obs] + [wp_val]
+
+            data = np.load(f"{path_energies}.npz")
+            psi_exact = data['vecs'][:, 0] # El primer eigenvector
+            psi_nqs = vstate.to_array()
+            psi_nqs /= np.linalg.norm(psi_nqs)
+            overlap =  np.abs(np.vdot(psi_nqs, psi_exact))**2
+
+            results = [jz, keeper.best_energy/N] + [np.real(best.expect(o).mean) for o in obs] + [wp_val] +[overlap]
 
             file_exists = os.path.isfile(obs_path)
             with open(obs_path, 'a', newline='') as f:
@@ -169,5 +173,10 @@ for layers in range(1,maxlayers+1):
                 if not file_exists:
                     writer.writerow(header)
                 writer.writerow(results)
+
+            df_metrics = pd.DataFrame(metrics_history)
+
+            # Guardamos a CSV (usamos index=False para no guardar los números de fila)
+            df_metrics.to_csv(path_metrics, index=False)
 
 ###############################################################################
