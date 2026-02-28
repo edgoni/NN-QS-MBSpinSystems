@@ -1,4 +1,8 @@
+#StudyDRM_samples
+#Train_DeepRBM
+
 ##TRAINING##
+
 ##Import##
 import netket as nk
 import numpy as np
@@ -25,7 +29,7 @@ import pickle
 
 ####Importamos de .py
 from utils import BestIterKeeper,make_extract_metrics, KitaevTransverse_H
-from basic_selfatt import MultiHead_Att
+from model_RBM import DeepMLP, DeepRBM
 
 
 ##Declaring KITAEV 
@@ -39,7 +43,7 @@ hi = nk.hilbert.Spin(s=1 / 2, N=kitaev_graph.n_nodes)
 kitaev_graph.hi=hi
 h = 1
 
-#-----------------------Declare Observables------------------------------#
+#Declare Observables--------------------------------#
 renyi = nkx.observable.Renyi2EntanglementEntropy(
     hi, np.arange(0, N / 2 + 1, dtype=int)
 )
@@ -51,7 +55,11 @@ Wp_op = (sigmax(hi, idx[0]) * sigmay(hi, idx[1]) * sigmaz(hi, idx[2]) * sigmax(h
 
 #---------------------------------------------------#
 
-####------------/REGLAS d MonteCarlo/--------------####
+
+#Training--------------------------------------------#
+
+
+####REGLAS d MonteCarlo
 rule1 = nk.sampler.rules.LocalRule()# flip de un solo spin para proponer nuevo estado
 rule2 = nk.sampler.rules.GaussianRule()# flip de todos los spins para proponer nuevo estado
 rules = [rule1]
@@ -60,14 +68,14 @@ sampler = nk.sampler.MetropolisSampler(
 )
 #############################################
 
-epochs = 7
+epochs = 2
 
 # definir los inicializadores según el artículo
 weights_init = normal(stddev=0.01)
 bias_init = normal(stddev=0.1)
 vstate_init =  []
 
-jz_values = np.linspace(0, 1, 11)
+jz_values = np.array([0.4,0.5])
 energies_exact = []
 matrics_history = {}
 
@@ -102,24 +110,25 @@ maxheads = 4
 
 # 1. INICIALIZACIÓN FUERA DEL BUCLE (Transfer Learning)
 # Al declarar vstate aquí, conservamos los pesos entre iteraciones de Jz
+n_samples_list = [1024, 2048, 4096, 8192]
 
-    
-for layers in range(1,maxlayers+1):
-    for heads in range(1,maxheads+1):
-        
+for samples in n_samples_list:    
+    for layers in range(1,maxlayers+1):        
         for i, jz in enumerate(jz_values):
+            ##########DECLARAMOS MODELO EN CADA ITERACION############
+            RBM = DeepRBM(num_layers=layers, alpha=1)
+            vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=samples)
+
             # Definición de paths incluyendo layers y heads
-            path_metrics = f'SelfAtt_metrics{layers}_head{heads}_{jz:.2f}_{lr_name}.csv'
-            filename = f"SelfAtt{layers}_head{heads}_{jz:.2f}_{lr_name}.mpack"
-            vstate_path = f"vstate_SelfAtt{layers}_head{heads}_{jz:.2f}_{lr_name}.pkl"
-            obs_path = f'obs_layers{layers}_head{heads}_{lr_name}.csv'
+            path_metrics = f'RBM_metrics{layers}_{jz:.2f}_{samples}.csv'
+            filename = f"RBM{layers}_{jz:.2f}_{samples}.mpack"
+            vstate_path = f"vstate_RBM{layers}_{jz:.2f}_{samples}.pkl"
+            obs_path = f'RBM_obs_layers{layers}_{samples}.csv'
             path_energies = 'energies_eigenvecs'
 
             print(f"\n--- Entrenando para Jz = {jz:.2f} ---")
 
-            ##########DECLARAMOS MODELO EN CADA ITERACION############
-            RBM = MultiHead_Att(layers=layers, heads=heads, dk=1)
-            vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=2048)
+        # Lógica de épocas: más en el inicio, menos en la continuación
 
 
             jx = jy = (1 - jz) / 2
@@ -138,10 +147,10 @@ for layers in range(1,maxlayers+1):
         # make_extract_metrics debe recibir H para calcular correctamente en cada paso
             callback_fn = [keeper.update, make_extract_metrics(metrics_history, H)]
 
-        # ENTRENAMIENTO
+        # 2. ENTRENAMIENTO
             driver.run(n_iter=epochs, out=log, callback=callback_fn, show_progress=True)
 
-        # ACTUALIZACIÓN ADIABÁTICA (Transfer Learning explícito)
+        # 3. ACTUALIZACIÓN ADIABÁTICA (Transfer Learning explícito)
         # Forzamos que el vstate para el PRÓXIMO Jz empiece con los MEJORES pesos de este Jz
             vstate.parameters = keeper.best_state.parameters
 
@@ -153,11 +162,11 @@ for layers in range(1,maxlayers+1):
             with open(vstate_path, "wb") as f:
                 pickle.dump(vstate.parameters, f)
 
-        # Cálculo de observables con el mejor estado encontrado
-            header = ['Jz', 'Energy','E_error' 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp','overlap']
+            # Cálculo de observables con el mejor estado encontrado
+            header = ['Jz', 'Energy','E_error', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp','overlap']
             best = keeper.best_state
             best_energy_stats = best.expect(H)
-            error = np.real(best_energy_stats.error_of_mean)    
+            error = np.real(best_energy_stats.error_of_mean)
             wp_val = np.real(best.expect(Wp_op).mean)
             obs = [renyi, magnet, mags, magnet @ magnet, mags @ mags]
 
@@ -167,7 +176,7 @@ for layers in range(1,maxlayers+1):
             psi_nqs = psi_nqs/np.linalg.norm(psi_nqs)
             overlap =  np.abs(np.vdot(psi_nqs, psi_exact))**2
 
-            results = [jz, keeper.best_energy/N, error/N] + [np.real(best.expect(o).mean) for o in obs] + [wp_val] +[overlap]
+            results = [jz, keeper.best_energy/N, error/N ] + [np.real(best.expect(o).mean) for o in obs] + [wp_val] +[overlap]
 
             file_exists = os.path.isfile(obs_path)
             with open(obs_path, 'a', newline='') as f:
@@ -178,7 +187,7 @@ for layers in range(1,maxlayers+1):
 
             df_metrics = pd.DataFrame(metrics_history)
 
-            # Guardamos a CSV (usamos index=False para no guardar los números de fila)
+                # Guardamos a CSV (usamos index=False para no guardar los números de fila)
             df_metrics.to_csv(path_metrics, index=False)
 
 ###############################################################################

@@ -67,7 +67,7 @@ sampler = nk.sampler.MetropolisSampler(
 )
 #############################################
 
-epochs = 7
+epochs = 2
 
 # definir los inicializadores según el artículo
 weights_init = normal(stddev=0.01)
@@ -162,18 +162,20 @@ for layers in range(1,maxlayers+1):
             pickle.dump(vstate.parameters, f)
 
         # Cálculo de observables con el mejor estado encontrado
-        header = ['Jz', 'Energy', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp','overlap']
+        header = ['Jz', 'Energy','E_error', 'S', 'm', 'ms', 'fluct', 'fluct_s', 'Wp','overlap']
         best = keeper.best_state
+        best_energy_stats = best.expect(H)
+        error = np.real(best_energy_stats.error_of_mean)
         wp_val = np.real(best.expect(Wp_op).mean)
         obs = [renyi, magnet, mags, magnet @ magnet, mags @ mags]
 
         data = np.load(f"{path_energies}.npz")
         psi_exact = data['vecs'][:, 0] # El primer eigenvector
         psi_nqs = vstate.to_array()
-        psi_nqs /= np.linalg.norm(psi_nqs)
+        psi_nqs = psi_nqs/np.linalg.norm(psi_nqs)
         overlap =  np.abs(np.vdot(psi_nqs, psi_exact))**2
 
-        results = [jz, keeper.best_energy/N] + [np.real(best.expect(o).mean) for o in obs] + [wp_val] +[overlap]
+        results = [jz, keeper.best_energy/N, error/N ] + [np.real(best.expect(o).mean) for o in obs] + [wp_val] +[overlap]
 
         file_exists = os.path.isfile(obs_path)
         with open(obs_path, 'a', newline='') as f:
