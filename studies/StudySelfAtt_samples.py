@@ -107,12 +107,14 @@ maxheads = 4
 n_samples_list = [1024, 2048, 4096, 8192]
 
 for samples in n_samples_list:
-    RBM = MultiHead_Att(layers=layers, heads=heads, dk=1)
-    vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=samples)
+
     for layers in range(1,maxlayers+1):
         for heads in range(1,maxheads+1):
             
+            
             for i, jz in enumerate(jz_values):
+                RBM = MultiHead_Att(layers=layers, heads=heads, dk=1)
+                vstate = nk.vqs.MCState(sampler, model=RBM, n_samples=samples)
                 # Definición de paths incluyendo layers y heads
                 path_metrics = f'SelfAtt_metrics{layers}_head{heads}_{jz:.2f}_{samples}.csv'
                 filename = f"SelfAtt{layers}_head{heads}_{jz:.2f}_{samples}.mpack"
